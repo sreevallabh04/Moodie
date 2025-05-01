@@ -196,65 +196,106 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return () => unsubscribe();
   }, [currentUser, currentConversationId, messageLimit]);
 
-  // Function to add a message to the current conversation in Firestore
-  const addMessageToFirestore = async (messageData: NewMessageData) => {
-    if (!currentUser || !currentConversationId) {
-      console.error("Cannot add message: No user logged in or no active conversation.");
-      return;
+  // Add message to Firestore with optimistic updates for better UX and retry capability
+
+  // Helper for retry operations with WebChannelConnection error handling
+  const retryOperation = async <T,>(
+    operation: () => Promise<T>,
+    maxRetries = 2
+  ): Promise<T | null> => {
+    let retries = 0;
+    
+    while (retries <= maxRetries) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        console.error(`Operation failed (attempt ${retries + 1}/${maxRetries + 1}):`, error);
+        
+        // Check for WebChannelConnection errors specifically
+        const errorString = String(error);
+        if (errorString.includes('WebChannelConnection') || 
+            errorString.includes('network-request-failed') ||
+            errorString.includes('insufficient permissions')) {
+          console.warn("Firestore connection issue detected");
+        }
+        
+        retries++;
+        
+        if (retries <= maxRetries) {
+          // Exponential backoff - wait longer between retries
+          const delay = Math.min(1000 * Math.pow(2, retries - 1), 10000);
+          console.log(`Retrying after ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          console.error("Maximum retries reached");
+          return null;
+        }
+      }
     }
     
-    try {
-      const messagesPath = `${BASE_CHAT_COLLECTION}/${currentUser.uid}/${CONVERSATIONS_COLLECTION}/${currentConversationId}/messages`;
-      const messagesRef = collection(db, messagesPath);
-      
-      // Add the message
-      await addDoc(messagesRef, {
-        ...messageData,
-        timestamp: serverTimestamp(),
-      });
-      
-      // Update conversation's lastUpdated timestamp
-      const conversationRef = doc(db, `${USER_SETTINGS_COLLECTION}/${currentUser.uid}/${CONVERSATIONS_COLLECTION}`, currentConversationId);
-      await setDoc(conversationRef, {
-        lastUpdated: serverTimestamp()
-      }, { merge: true });
-      
-      // If this is the first message, update the conversation title
-      if (messages.length === 0 && messageData.isUser) {
-        // Use first few words of user message as conversation title
-        const title = messageData.text.split(' ').slice(0, 5).join(' ') + '...';
-        await setDoc(conversationRef, { title }, { merge: true });
-      }
-    } catch (error) {
-      console.error("Error adding message to Firestore:", error);
-    }
+    return null;
   };
 
-  // Start a new conversation
+  // Start a new conversation with optimistic updates and robust error handling
   const startNewConversation = async () => {
     if (!currentUser) return;
     
+    // Create a temporary ID for immediate UI updates
+    const tempId = `temp_${Date.now()}`;
+    
+    // Update UI state immediately for better UX
+    setCurrentConversationId(tempId);
+    const tempConversation = {
+      id: tempId,
+      title: 'New Conversation',
+      lastUpdated: new Date()
+    };
+    setConversations(prev => [tempConversation, ...prev]);
+    
     try {
-      // Create a new conversation document
+      // Try to create the conversation in Firestore with retries
       const userConversationsRef = collection(db, `${USER_SETTINGS_COLLECTION}/${currentUser.uid}/${CONVERSATIONS_COLLECTION}`);
-      const newConversationRef = await addDoc(userConversationsRef, {
-        title: 'New Conversation',
-        createdAt: serverTimestamp(),
-        lastUpdated: serverTimestamp()
+      
+      const newConversationRef = await retryOperation(async () => {
+        return await addDoc(userConversationsRef, {
+          title: 'New Conversation',
+          createdAt: serverTimestamp(),
+          lastUpdated: serverTimestamp()
+        });
       });
       
-      // Set as active conversation
+      if (!newConversationRef) {
+        console.warn("Couldn't create conversation in Firestore - using local version");
+        return tempId; // Return temp ID so conversation still works locally
+      }
+      
+      // Update to the real Firestore ID
       setCurrentConversationId(newConversationRef.id);
       
-      // Update user settings with new active conversation
+      // Remove temp conversation and update with real one
+      setConversations(prev => {
+        const filtered = prev.filter(c => c.id !== tempId);
+        const newConv = {
+          id: newConversationRef.id,
+          title: 'New Conversation',
+          lastUpdated: new Date()
+        };
+        return [newConv, ...filtered];
+      });
+      
+      // Update user settings with new conversation ID
       const userSettingsRef = doc(db, USER_SETTINGS_COLLECTION, currentUser.uid);
-      await setDoc(userSettingsRef, {
-        activeConversationId: newConversationRef.id
-      }, { merge: true });
+      await retryOperation(async () => {
+        await setDoc(userSettingsRef, {
+          activeConversationId: newConversationRef.id
+        }, { merge: true });
+      });
       
       return newConversationRef.id;
     } catch (error) {
       console.error("Error creating new conversation:", error);
+      // Still return temp ID so the UI works in offline mode
+      return tempId;
     }
   };
 
@@ -314,99 +355,185 @@ export const ChatProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return response;
   };
 
-  // Function to send user message and get AI response with failover to direct Firestore
+  // Add message to Firestore with optimistic updates for better UX
+  const addMessageToFirestore = async (messageData: NewMessageData) => {
+    if (!currentUser || !currentConversationId) {
+      console.error("Cannot add message: No user logged in or no active conversation.");
+      return;
+    }
+    
+    // Create an optimistic message to show immediately in UI
+    const optimisticMessage: Message = {
+      id: `temp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+      text: messageData.text,
+      isUser: messageData.isUser,
+      timestamp: Timestamp.now() // Use local timestamp for optimistic update
+    };
+    
+    // Update UI immediately for responsive experience
+    setMessages(prevMessages => [...prevMessages, optimisticMessage]);
+    
+    try {
+      const messagesPath = `${BASE_CHAT_COLLECTION}/${currentUser.uid}/${CONVERSATIONS_COLLECTION}/${currentConversationId}/messages`;
+      const messagesRef = collection(db, messagesPath);
+      
+      // Add message to Firestore with retry
+      const messageRef = await retryOperation(async () => {
+        return await addDoc(messagesRef, {
+          ...messageData,
+          timestamp: serverTimestamp(),
+        });
+      });
+      
+      if (!messageRef) {
+        console.warn("Failed to save message to Firestore, but UI remains updated");
+        return;
+      }
+      
+      // Update conversation metadata
+      const conversationRef = doc(db, `${USER_SETTINGS_COLLECTION}/${currentUser.uid}/${CONVERSATIONS_COLLECTION}`, currentConversationId);
+      await retryOperation(async () => {
+        // Update conversation timestamp
+        await setDoc(conversationRef, { lastUpdated: serverTimestamp() }, { merge: true });
+        
+        // If this is the first message, update the conversation title
+        if (messages.length === 0 && messageData.isUser) {
+          const title = messageData.text.split(' ').slice(0, 5).join(' ') + '...';
+          await setDoc(conversationRef, { title }, { merge: true });
+        }
+      });
+    } catch (error) {
+      console.error("Error adding message to Firestore:", error);
+      // Message is already in local state, so user experience is maintained
+    }
+  };
+
+  // Enhanced send message function with better error handling
   const sendMessage = async (text: string) => {
     if (!currentUser) {
       console.error("Cannot send message: No user logged in.");
       return;
     }
     
-    // Ensure we have an active conversation
-    if (!currentConversationId) {
-      await startNewConversation();
-    }
-
-    // Add user message to Firestore
-    const userMessageData: NewMessageData = { text, isUser: true };
-    await addMessageToFirestore(userMessageData);
-
-    setLoadingApi(true);
-
-    // Prepare message history for API
-    const historyLimit = 10; // Send last 10 messages for context
-    const recentMessages = messages.slice(-historyLimit);
-
     try {
-      // Get API endpoint from environment variables
-      const apiEndpoint = import.meta.env.VITE_API_ENDPOINT;
-      if (!apiEndpoint) {
-        throw new Error("API endpoint is missing. Please check your .env file.");
-      }
-
-      // Call our backend proxy
-      const response = await fetch(apiEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messages: [
-            ...recentMessages,
-            { text, isUser: true }
-          ],
-          aiPersonality // Send selected personality
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(`API Error: ${response.status} - ${data.error || 'Unknown error'}`);
-      }
-
-      // Add AI message to Firestore
-      const aiMessageData: NewMessageData = {
-        text: data.text,
-        isUser: false,
-      };
-      await addMessageToFirestore(aiMessageData);
-
-    } catch (error) {
-      console.error('Error calling AI API or processing response:', error);
-      
-      // Generate a direct Firestore response as fallback
-      try {
-        console.log("Falling back to direct Firestore response generation");
-        const fallbackResponse = await generateDirectFirestoreResponse(text);
-        
-        // Add the fallback response to Firestore
-        const fallbackMessageData: NewMessageData = {
-          text: fallbackResponse,
-          isUser: false,
-        };
-        await addMessageToFirestore(fallbackMessageData);
-        
-      } catch (fallbackError) {
-        console.error("Fallback response generation failed:", fallbackError);
-        
-        // If all else fails, add a generic error message
-        let errorText: string;
-        
-        if (error instanceof Error) {
-          if (error.message.includes("API endpoint is missing")) {
-            errorText = "⚠️ API setup error: Missing endpoint configuration.";
-          } else if (error.message.includes("All AI keys are temporarily down")) {
-            errorText = "Sorry, our AI service is temporarily unavailable. Please try again later. 🛠️";
-          } else {
-            errorText = `Oops, something went wrong: ${error.message}. Please try again.`;
-          }
-        } else {
-          errorText = "💫 Connection issue. Can we try again?";
+      // Ensure we have an active conversation
+      if (!currentConversationId) {
+        const newId = await startNewConversation();
+        if (!newId) {
+          throw new Error("Failed to create a conversation");
         }
-        
-        const errorMessageData: NewMessageData = { text: errorText, isUser: false };
-        await addMessageToFirestore(errorMessageData);
       }
+
+      // Add user message to Firestore (with optimistic UI update)
+      const userMessageData: NewMessageData = { text, isUser: true };
+      await addMessageToFirestore(userMessageData);
+
+      setLoadingApi(true);
+
+      // Prepare message history for API
+      const historyLimit = 10; // Send last 10 messages for context
+      const recentMessages = messages.slice(-historyLimit);
+
+      try {
+        // Get API endpoint from environment variables
+        const apiEndpoint = import.meta.env.VITE_API_ENDPOINT;
+        if (!apiEndpoint) {
+          throw new Error("API endpoint is missing. Please check your .env file.");
+        }
+
+        // Call our backend proxy with timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+        
+        try {
+          const response = await fetch(apiEndpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              messages: [
+                ...recentMessages,
+                { text, isUser: true }
+              ],
+              aiPersonality // Send selected personality
+            }),
+            signal: controller.signal
+          });
+          
+          clearTimeout(timeoutId);
+          
+          const data = await response.json();
+
+          if (!response.ok) {
+            throw new Error(`API Error: ${response.status} - ${data.error || 'Unknown error'}`);
+          }
+
+          // Add AI message to Firestore (with optimistic UI update)
+          const aiMessageData: NewMessageData = {
+            text: data.text,
+            isUser: false,
+          };
+          await addMessageToFirestore(aiMessageData);
+        } catch (fetchError: any) {
+          clearTimeout(timeoutId);
+          if (fetchError.name === 'AbortError') {
+            throw new Error('API request timed out');
+          }
+          throw fetchError;
+        }
+      } catch (error) {
+        console.error('Error calling AI API or processing response:', error);
+        
+        // Generate a direct Firestore response as fallback
+        try {
+          console.log("Falling back to direct Firestore response generation");
+          const fallbackResponse = await generateDirectFirestoreResponse(text);
+          
+          // Add the fallback response to Firestore
+          const fallbackMessageData: NewMessageData = {
+            text: fallbackResponse,
+            isUser: false,
+          };
+          await addMessageToFirestore(fallbackMessageData);
+          
+        } catch (fallbackError) {
+          console.error("Fallback response generation failed:", fallbackError);
+          
+          // If all else fails, add a generic error message
+          let errorText: string;
+          
+          if (error instanceof Error) {
+            if (error.message.includes("API endpoint is missing")) {
+              errorText = "⚠️ API setup error: Missing endpoint configuration.";
+            } else if (error.message.includes("All AI keys are temporarily down")) {
+              errorText = "Sorry, our AI service is temporarily unavailable. Please try again later. 🛠️";
+            } else if (error.message.includes("WebChannelConnection") || 
+                       error.message.includes("transport errored")) {
+              errorText = "📶 Firestore connection error. Please check your network and try again.";
+            } else {
+              errorText = `Oops, something went wrong: ${error.message}. Please try again.`;
+            }
+          } else {
+            errorText = "💫 Connection issue. Can we try again?";
+          }
+          
+          const errorMessageData: NewMessageData = { text: errorText, isUser: false };
+          await addMessageToFirestore(errorMessageData);
+        }
+      }
+    } catch (error) {
+      console.error("Fatal error in message flow:", error);
+      
+      // Add an error message to the local UI even if Firestore fails completely
+      const errorMessage: Message = {
+        id: `error_${Date.now()}`,
+        text: "⚠️ There was an issue sending your message. Please check your connection and try again.",
+        isUser: false,
+        timestamp: Timestamp.now()
+      };
+      
+      setMessages(prev => [...prev, errorMessage]);
     } finally {
       setLoadingApi(false);
     }
