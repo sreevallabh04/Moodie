@@ -59,10 +59,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     signOut,
   };
 
-  // Don't render children until loading is false to prevent flicker
+  // Render children immediately; components can use the 'loading' state
+  // from the context to show their own loading indicators if needed.
   return (
     <AuthContext.Provider value={value}>
-      {!loading && children}
+      {children}
     </AuthContext.Provider>
   );
 };
