@@ -1,78 +1,106 @@
 // Backend proxy for Gemini API with key rotation
 // This file would typically be hosted on a separate server or serverless function
 
-/**
- * Configuration for API key rotation
- * In production, these would be set via environment variables
- */
-const CONFIG = {
-  // Array of API keys for rotation
-  // In production, this would be loaded from environment variables
-  API_KEYS: process.env.GEMINI_API_KEYS ? process.env.GEMINI_API_KEYS.split(',') : [],
-  
-  // Gemini API endpoint
-  API_ENDPOINT: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent',
-  
-  // Retry configuration
-  MAX_RETRIES: 3,
-  RETRY_DELAY_MS: 1000,
-  
-  // Key rotation tracking
+// Initial state for tracking key usage across requests
+const keyState = {
   currentKeyIndex: 0,
   keyUsageCount: {},
-  
   // Rate limiting per key - reset counter after this time period (ms)
   RATE_LIMIT_RESET_PERIOD: 60 * 60 * 1000, // 1 hour
-  RATE_LIMIT_PER_KEY: 60, // requests per period
+  RATE_LIMIT_PER_KEY: 60 // requests per period
 };
 
-// Initialize key usage tracking
-CONFIG.API_KEYS.forEach(key => {
-  CONFIG.keyUsageCount[key] = {
-    count: 0,
-    resetTime: Date.now() + CONFIG.RATE_LIMIT_RESET_PERIOD
+/**
+ * Get fresh configuration with current environment variables
+ * This ensures we always use the latest environment variables even if they were loaded
+ * after this module was imported
+ * @returns {Object} - Configuration object with fresh API keys from environment
+ */
+function getConfig() {
+  // Get API keys from current environment - freshly each time
+  const apiKeys = process.env.GEMINI_API_KEYS ? process.env.GEMINI_API_KEYS.split(',') : [];
+  
+  // Add diagnostic logging when API keys status changes
+  if (apiKeys.length > 0) {
+    console.log(`Chat handler found ${apiKeys.length} API keys in environment`);
+  } else {
+    console.error("No API keys configured in environment for chat handler");
+  }
+  
+  // Initialize tracking for any new keys
+  apiKeys.forEach(key => {
+    if (!keyState.keyUsageCount[key]) {
+      keyState.keyUsageCount[key] = {
+        count: 0,
+        resetTime: Date.now() + keyState.RATE_LIMIT_RESET_PERIOD
+      };
+    }
+  });
+  
+  return {
+    // Array of API keys for rotation - get fresh from environment each time
+    API_KEYS: apiKeys,
+    
+    // Gemini API endpoint
+    API_ENDPOINT: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent',
+    
+    // Retry configuration
+    MAX_RETRIES: 3,
+    RETRY_DELAY_MS: 1000,
+    
+    // Key rotation tracking - preserve existing state
+    currentKeyIndex: keyState.currentKeyIndex,
+    keyUsageCount: keyState.keyUsageCount,
+    
+    // Rate limiting settings
+    RATE_LIMIT_RESET_PERIOD: keyState.RATE_LIMIT_RESET_PERIOD,
+    RATE_LIMIT_PER_KEY: keyState.RATE_LIMIT_PER_KEY
   };
-});
+}
 
 /**
  * Check if a key has exceeded rate limits and should be rotated
+ * @param {Object} config - Current configuration
  * @param {string} key - API key to check
  * @returns {boolean} - Whether key has exceeded rate limits
  */
-function shouldRotateKey(key) {
-  const usage = CONFIG.keyUsageCount[key];
+function shouldRotateKey(config, key) {
+  const usage = config.keyUsageCount[key];
   
   // Reset counter if we're past the reset time
   if (Date.now() > usage.resetTime) {
     usage.count = 0;
-    usage.resetTime = Date.now() + CONFIG.RATE_LIMIT_RESET_PERIOD;
+    usage.resetTime = Date.now() + config.RATE_LIMIT_RESET_PERIOD;
   }
   
   // Check if we've exceeded the rate limit
-  return usage.count >= CONFIG.RATE_LIMIT_PER_KEY;
+  return usage.count >= config.RATE_LIMIT_PER_KEY;
 }
 
 /**
  * Get the next available API key
+ * @param {Object} config - Current configuration
  * @returns {string|null} - Next available API key or null if all keys exhausted
  */
-function getNextApiKey() {
-  if (CONFIG.API_KEYS.length === 0) {
-    console.error("No API keys configured");
+function getNextApiKey(config) {
+  if (config.API_KEYS.length === 0) {
+    console.error("No API keys available in configuration");
     return null;
   }
   
   // Try all keys in sequence
   let keysChecked = 0;
-  while (keysChecked < CONFIG.API_KEYS.length) {
-    const key = CONFIG.API_KEYS[CONFIG.currentKeyIndex];
+  while (keysChecked < config.API_KEYS.length) {
+    const key = config.API_KEYS[config.currentKeyIndex];
     
-    // Increment for next time
-    CONFIG.currentKeyIndex = (CONFIG.currentKeyIndex + 1) % CONFIG.API_KEYS.length;
+    // Increment for next time and update shared state
+    config.currentKeyIndex = (config.currentKeyIndex + 1) % config.API_KEYS.length;
+    keyState.currentKeyIndex = config.currentKeyIndex; // Update persistent state
+    
     keysChecked++;
     
     // Check if this key is under rate limit
-    if (!shouldRotateKey(key)) {
+    if (!shouldRotateKey(config, key)) {
       return key;
     }
   }
@@ -83,11 +111,14 @@ function getNextApiKey() {
 
 /**
  * Increment usage counter for a key
+ * @param {Object} config - Current configuration
  * @param {string} key - API key to increment counter for
  */
-function incrementKeyUsage(key) {
-  if (CONFIG.keyUsageCount[key]) {
-    CONFIG.keyUsageCount[key].count++;
+function incrementKeyUsage(config, key) {
+  if (config.keyUsageCount[key]) {
+    config.keyUsageCount[key].count++;
+    // Update persistent state
+    keyState.keyUsageCount[key] = config.keyUsageCount[key];
   }
 }
 
@@ -137,13 +168,15 @@ function formatMessagesForGemini(messages, aiPersonality = 'default') {
  * @returns {Promise<Object>} - Gemini API response
  */
 async function callGeminiWithKeyRotation(messages, options = {}) {
+  // Get fresh configuration for this request
+  const config = getConfig();
   const { aiPersonality = 'default' } = options;
   let attempts = 0;
   let lastError = null;
   
-  while (attempts < CONFIG.MAX_RETRIES) {
+  while (attempts < config.MAX_RETRIES) {
     // Get an available API key
-    const apiKey = getNextApiKey();
+    const apiKey = getNextApiKey(config);
     
     if (!apiKey) {
       return {
@@ -158,7 +191,7 @@ async function callGeminiWithKeyRotation(messages, options = {}) {
       const requestBody = formatMessagesForGemini(messages, aiPersonality);
       
       // Make the API request
-      const response = await fetch(`${CONFIG.API_ENDPOINT}?key=${apiKey}`, {
+      const response = await fetch(`${config.API_ENDPOINT}?key=${apiKey}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -167,7 +200,7 @@ async function callGeminiWithKeyRotation(messages, options = {}) {
       });
       
       // Successful request - increment usage counter
-      incrementKeyUsage(apiKey);
+      incrementKeyUsage(config, apiKey);
       
       // Handle HTTP error responses
       if (!response.ok) {
@@ -209,7 +242,7 @@ async function callGeminiWithKeyRotation(messages, options = {}) {
       lastError = `Request error: ${error.message}`;
       
       // Add delay before retry
-      await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY_MS));
+      await new Promise(resolve => setTimeout(resolve, config.RETRY_DELAY_MS));
     }
   }
   

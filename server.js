@@ -7,10 +7,19 @@ const journalSummaryHandler = require('./src/api/journal-summary.js');
 
 // Load environment variables
 dotenv.config();
+console.log('Loaded environment variables');
+
+// Verify API keys have been properly loaded
+if (process.env.GEMINI_API_KEYS) {
+  const keyCount = process.env.GEMINI_API_KEYS.split(',').length;
+  console.log(`Found ${keyCount} API keys configured`);
+} else {
+  console.warn('No API keys configured - chat responses will use fallback mode');
+}
 
 // Create Express app
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002; // Use different port to avoid conflict
 
 // Middleware
 app.use(cors({
@@ -18,6 +27,9 @@ app.use(cors({
     ? [process.env.FRONTEND_URL || 'https://moodie-app.vercel.app']
     : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175']
 }));
+
+// Log CORS configuration for debugging
+console.log(`CORS configured for development: ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175']`);
 app.use(express.json());
 
 // Routes
