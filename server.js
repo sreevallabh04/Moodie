@@ -10,11 +10,11 @@ dotenv.config();
 console.log('Loaded environment variables');
 
 // Verify API keys have been properly loaded
-if (process.env.GEMINI_API_KEYS) {
-  const keyCount = process.env.GEMINI_API_KEYS.split(',').length;
-  console.log(`Found ${keyCount} API keys configured`);
+if (process.env.GROQ_API_KEYS) {
+  const keyCount = process.env.GROQ_API_KEYS.split(',').length;
+  console.log(`Found ${keyCount} Groq API keys configured`);
 } else {
-  console.warn('No API keys configured - chat responses will use fallback mode');
+  console.warn('No Groq API keys configured - chat responses will use fallback mode');
 }
 
 // Create Express app

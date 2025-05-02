@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Calendar, Save, ChevronLeft, ChevronRight, Loader2, Sparkles } from 'lucide-react';
+import { Calendar, Save, ChevronLeft, ChevronRight, Loader2, Sparkles, X, ArrowLeft } from 'lucide-react';
 import { format } from 'date-fns';
 import Button from '../components/Button';
-import { useJournalContext } from '../contexts/JournalContext';
+import { useJournalContext, JournalEntry } from '../contexts/JournalContext';
 import JournalCard from '../components/JournalCard';
 import MoodChart from '../components/MoodChart';
 import MoodSlider from '../components/MoodSlider';
 import WeeklySummary from '../components/WeeklySummary';
+import JournalHistory from '../components/JournalHistory';
 
 const JournalPage: React.FC = () => {
   // Get expanded context values
@@ -23,8 +24,19 @@ const JournalPage: React.FC = () => {
   
   const [journalText, setJournalText] = useState('');
   const [currentMood, setCurrentMood] = useState<number>(3); // Default mood to 3 (neutral)
-  const [view, setView] = useState<'write' | 'entries' | 'analytics'>('write');
+  const [view, setView] = useState<'write' | 'entries' | 'analytics' | 'detail'>('write');
+  const [selectedEntry, setSelectedEntry] = useState<JournalEntry | null>(null);
+  // Handle selecting an entry for detailed view
+  const handleSelectEntry = (entry: JournalEntry) => {
+    setSelectedEntry(entry);
+    setView('detail');
+  };
 
+  // Return to entries view from detail view
+  const handleBackToEntries = () => {
+    setSelectedEntry(null);
+    setView('entries');
+  };
   const today = new Date();
   const formattedDate = format(today, 'EEEE, MMMM do, yyyy');
 
@@ -88,39 +100,41 @@ const JournalPage: React.FC = () => {
           )}
         </div>
 
-        {/* Navigation Tabs */}
-        <div className="flex mb-6 border-b border-gray-200">
-          <button
-            onClick={() => setView('write')}
-            className={`pb-2 px-4 font-medium text-sm ${
-              view === 'write'
-                ? 'text-primary-500 border-b-2 border-primary-500'
-                : 'text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            Write Today's Entry
-          </button>
-          <button
-            onClick={() => setView('entries')}
-            className={`pb-2 px-4 font-medium text-sm ${
-              view === 'entries'
-                ? 'text-primary-500 border-b-2 border-primary-500'
-                : 'text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            Previous Entries
-          </button>
-          <button
-            onClick={() => setView('analytics')}
-            className={`pb-2 px-4 font-medium text-sm ${
-              view === 'analytics'
-                ? 'text-primary-500 border-b-2 border-primary-500'
-                : 'text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            Mood Analytics
-          </button>
-        </div>
+        {view !== 'detail' && (
+          /* Navigation Tabs - Hidden in detail view */
+          <div className="flex mb-6 border-b border-gray-200">
+            <button
+              onClick={() => setView('write')}
+              className={`pb-2 px-4 font-medium text-sm ${
+                view === 'write'
+                  ? 'text-primary-500 border-b-2 border-primary-500'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              Write Today's Entry
+            </button>
+            <button
+              onClick={() => setView('entries')}
+              className={`pb-2 px-4 font-medium text-sm ${
+                view === 'entries'
+                  ? 'text-primary-500 border-b-2 border-primary-500'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              Journal History
+            </button>
+            <button
+              onClick={() => setView('analytics')}
+              className={`pb-2 px-4 font-medium text-sm ${
+                view === 'analytics'
+                  ? 'text-primary-500 border-b-2 border-primary-500'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              Mood Analytics
+            </button>
+          </div>
+        )}
 
         {/* Content based on view */}
         {view === 'write' && (
@@ -178,24 +192,61 @@ const JournalPage: React.FC = () => {
                 <span className="text-gray-500">Loading entries...</span>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {entries.length > 0 ? (
-                  entries.map((entry) => (
-                    <JournalCard key={entry.id} entry={entry} />
-                  ))
-                ) : (
-                  <div className="col-span-full text-center py-10">
-                    <p className="text-gray-500 mb-4">No journal entries yet.</p>
-                    <Button
-                      onClick={() => setView('write')}
-                      variant="primary"
-                    >
-                      Write Your First Entry
-                    </Button>
-                  </div>
-                )}
-              </div>
+              <JournalHistory onSelectEntry={handleSelectEntry} />
             )}
+          </motion.div>
+        )}
+
+        {view === 'detail' && selectedEntry && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="bg-white rounded-xl shadow-md overflow-hidden"
+          >
+            {/* Detail view header with back button */}
+            <div className="p-4 border-b border-gray-200 flex items-center">
+              <button 
+                onClick={handleBackToEntries}
+                className="mr-3 p-1.5 rounded-full hover:bg-gray-100 text-gray-500"
+              >
+                <ArrowLeft size={20} />
+              </button>
+              <h2 className="text-lg font-medium">Journal Entry</h2>
+            </div>
+            
+            {/* Full journal entry detail */}
+            <div className="p-6">
+              <div className="flex justify-between items-center mb-4">
+                <div className="flex items-center">
+                  <Calendar size={18} className="text-gray-500 mr-2" />
+                  <span className="text-gray-600">
+                    {format(selectedEntry.date.toDate(), 'EEEE, MMMM d, yyyy')}
+                  </span>
+                </div>
+                <div 
+                  className="px-3 py-1 rounded-full flex items-center gap-1 text-primary-600 bg-primary-50"
+                  title={`Mood level: ${selectedEntry.mood}`}
+                >
+                  <span>Mood: </span>
+                  <span className="text-xl">
+                    {['😔', '😕', '😐', '🙂', '😊'][selectedEntry.mood - 1]}
+                  </span>
+                </div>
+              </div>
+              
+              <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-100">
+                <p className="text-gray-700 whitespace-pre-line">{selectedEntry.content}</p>
+              </div>
+              
+              <div className="mt-6 flex justify-end space-x-3">
+                <Button 
+                  variant="secondary"
+                  onClick={handleBackToEntries}
+                >
+                  Back to Journal
+                </Button>
+              </div>
+            </div>
           </motion.div>
         )}
 

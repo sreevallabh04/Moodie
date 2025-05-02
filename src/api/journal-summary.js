@@ -1,4 +1,4 @@
-// Backend API endpoint for journal summary generation using Gemini API
+// Backend API endpoint for journal summary generation using Groq API
 // Uses the same API key rotation mechanism as chat.js
 
 /**
@@ -7,10 +7,13 @@
  */
 const CONFIG = {
   // Array of API keys for rotation (loaded from environment variables)
-  API_KEYS: process.env.GEMINI_API_KEYS ? process.env.GEMINI_API_KEYS.split(',') : [],
+  API_KEYS: process.env.GROQ_API_KEYS ? process.env.GROQ_API_KEYS.split(',') : [],
   
-  // Gemini API endpoint
-  API_ENDPOINT: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent',
+  // Groq API endpoint
+  API_ENDPOINT: 'https://api.groq.com/openai/v1/chat/completions',
+  
+  // Default model
+  DEFAULT_MODEL: 'llama3-70b-8192',
   
   // Retry configuration
   MAX_RETRIES: 3,
@@ -90,12 +93,12 @@ function incrementKeyUsage(key) {
 }
 
 /**
- * Format journal entries for Gemini API
+ * Format journal entries for Groq API
  * @param {Array} entries - Journal entries to analyze
  * @param {string} userName - User's name for personalization
- * @returns {Object} - Formatted request for Gemini
+ * @returns {Array} - Formatted messages for Groq
  */
-function formatJournalRequestForGemini(entries, userName) {
+function formatJournalRequestForGroq(entries, userName) {
   // Create a system prompt for journal analysis
   const systemPrompt = `You are an expert emotional wellness analyst and therapist. 
 Analyze the following journal entries from ${userName || 'the user'} for the past week. 
@@ -124,23 +127,26 @@ Format your response as a structured JSON object with the following fields:
     `Date: ${entry.date}\nMood: ${entry.mood}/5\nContent: ${entry.content}`
   ).join('\n\n');
 
-  return {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: systemPrompt + "\n\nJOURNAL ENTRIES:\n\n" + entriesText }]
-      }
-    ]
-  };
+  // Format for Groq OpenAI-compatible API (array of messages)
+  return [
+    {
+      role: "system",
+      content: systemPrompt
+    },
+    {
+      role: "user",
+      content: "JOURNAL ENTRIES:\n\n" + entriesText
+    }
+  ];
 }
 
 /**
- * Call Gemini API with automatic key rotation
+ * Call Groq API with automatic key rotation
  * @param {Array} entries - Journal entries to analyze
  * @param {Object} options - Additional options
- * @returns {Promise<Object>} - Gemini API response
+ * @returns {Promise<Object>} - Groq API response
  */
-async function callGeminiWithKeyRotation(entries, options = {}) {
+async function callGroqWithKeyRotation(entries, options = {}) {
   const { userName = 'User' } = options;
   let attempts = 0;
   let lastError = null;
@@ -158,14 +164,23 @@ async function callGeminiWithKeyRotation(entries, options = {}) {
     }
     
     try {
-      // Format entries for Gemini
-      const requestBody = formatJournalRequestForGemini(entries, userName);
+      // Format entries for Groq
+      const messages = formatJournalRequestForGroq(entries, userName);
+      
+      // Create request body for Groq
+      const requestBody = {
+        model: CONFIG.DEFAULT_MODEL,
+        messages: messages,
+        temperature: 0.3, // Lower temperature for more structured response
+        max_tokens: 1000
+      };
       
       // Make the API request
-      const response = await fetch(`${CONFIG.API_ENDPOINT}?key=${apiKey}`, {
+      const response = await fetch(CONFIG.API_ENDPOINT, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
         },
         body: JSON.stringify(requestBody)
       });
@@ -194,15 +209,15 @@ async function callGeminiWithKeyRotation(entries, options = {}) {
       // Parse successful response
       const data = await response.json();
       
-      if (!data.candidates || !data.candidates.length || !data.candidates[0].content) {
+      if (!data.choices || !data.choices.length || !data.choices[0].message) {
         return {
           success: false,
-          error: "Invalid response format from Gemini API"
+          error: "Invalid response format from Groq API"
         };
       }
       
       // Extract JSON data from the text response
-      const responseText = data.candidates[0].content.parts[0].text;
+      const responseText = data.choices[0].message.content;
       let jsonData;
       
       try {
@@ -251,7 +266,7 @@ async function callGeminiWithKeyRotation(entries, options = {}) {
   // If we reach here, all attempts failed
   return {
     success: false,
-    error: lastError || "Failed to reach Gemini API after multiple attempts",
+    error: lastError || "Failed to reach Groq API after multiple attempts",
     fallbackResponse: true
   };
 }
@@ -277,8 +292,8 @@ async function handler(req, res) {
       });
     }
     
-    // Make request to Gemini API with key rotation
-    const result = await callGeminiWithKeyRotation(entries, { userName });
+    // Make request to Groq API with key rotation
+    const result = await callGroqWithKeyRotation(entries, { userName });
     
     if (!result.success) {
       // If it's a fallback response, return 503

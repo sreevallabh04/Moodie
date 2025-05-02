@@ -73,6 +73,10 @@ interface JournalContextType {
 const BASE_JOURNAL_COLLECTION = 'userJournals';
 const SUMMARIES_COLLECTION = 'summaries';
 
+// Local storage keys
+const LOCAL_STORAGE_ENTRIES_KEY = 'moodie_journal_entries';
+const LOCAL_STORAGE_SUMMARY_KEY = 'moodie_journal_summary';
+
 const JournalContext = createContext<JournalContextType | undefined>(undefined);
 
 export const JournalProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
@@ -84,6 +88,89 @@ export const JournalProvider: React.FC<{ children: ReactNode }> = ({ children })
   const [longestStreak, setLongestStreak] = useState<number>(0);
   
   const { currentUser } = useAuthContext();
+
+  // Helper function: Convert Timestamp objects for localStorage serialization
+  const serializeTimestamp = (timestamp: Timestamp) => ({
+    seconds: timestamp.seconds,
+    nanoseconds: timestamp.nanoseconds
+  });
+
+  // Helper function: Convert serialized timestamps back to Firestore Timestamp
+  const deserializeTimestamp = (serialized: any): Timestamp => {
+    if (!serialized) return Timestamp.now();
+    
+    if (serialized.seconds !== undefined) {
+      return new Timestamp(serialized.seconds, serialized.nanoseconds || 0);
+    }
+    
+    // Handle if it's a number (milliseconds)
+    if (typeof serialized === 'number') {
+      return Timestamp.fromMillis(serialized);
+    }
+    
+    // Default
+    return Timestamp.now();
+  };
+
+  // Load entries from local storage on initial mount
+  useEffect(() => {
+    if (!currentUser) return;
+    
+    try {
+      const storedEntries = localStorage.getItem(`${LOCAL_STORAGE_ENTRIES_KEY}_${currentUser.uid}`);
+      if (storedEntries) {
+        const parsedEntries = JSON.parse(storedEntries);
+        
+        // Convert serialized dates back to Firestore Timestamps
+        const convertedEntries = parsedEntries.map((entry: any) => ({
+          ...entry,
+          date: deserializeTimestamp(entry.date)
+        }));
+        
+        setEntries(convertedEntries);
+        calculateStreaks(convertedEntries);
+        console.log("Successfully loaded entries from local storage:", convertedEntries.length);
+      }
+    } catch (error) {
+      console.error("Error loading entries from local storage:", error);
+    }
+  }, [currentUser]);
+
+  // Load summary from local storage on initial mount
+  useEffect(() => {
+    if (!currentUser) return;
+    
+    try {
+      const storedSummary = localStorage.getItem(`${LOCAL_STORAGE_SUMMARY_KEY}_${currentUser.uid}`);
+      if (storedSummary) {
+        const parsedSummary = JSON.parse(storedSummary);
+        
+        // Convert serialized timestamps back to Firestore Timestamps
+        const convertedSummary = {
+          ...parsedSummary,
+          createdAt: deserializeTimestamp(parsedSummary.createdAt),
+          startDate: deserializeTimestamp(parsedSummary.startDate),
+          endDate: deserializeTimestamp(parsedSummary.endDate),
+          moodTrends: {
+            ...parsedSummary.moodTrends,
+            highestDay: parsedSummary.moodTrends.highestDay ? {
+              ...parsedSummary.moodTrends.highestDay,
+              date: deserializeTimestamp(parsedSummary.moodTrends.highestDay.date)
+            } : undefined,
+            lowestDay: parsedSummary.moodTrends.lowestDay ? {
+              ...parsedSummary.moodTrends.lowestDay,
+              date: deserializeTimestamp(parsedSummary.moodTrends.lowestDay.date)
+            } : undefined
+          }
+        };
+        
+        setWeeklySummary(convertedSummary as JournalSummary);
+        console.log("Successfully loaded summary from local storage");
+      }
+    } catch (error) {
+      console.error("Error loading summary from local storage:", error);
+    }
+  }, [currentUser]);
 
   // Set up real-time listener for journal entries
   useEffect(() => {
@@ -112,13 +199,74 @@ export const JournalProvider: React.FC<{ children: ReactNode }> = ({ children })
       
       // Calculate streaks when entries change
       calculateStreaks(fetchedEntries);
+      
+      // Save to local storage for offline access
+      saveEntriesToLocalStorage(fetchedEntries);
+      
     }, (error) => {
       console.error("Error fetching journal entries:", error);
       setLoading(false);
+      
+      // No need to load from localStorage here as we already did it in the mount effect
     });
 
     return () => unsubscribe();
   }, [currentUser]);
+
+  // Save entries to local storage
+  const saveEntriesToLocalStorage = (entriesToSave: JournalEntry[]) => {
+    if (!currentUser || entriesToSave.length === 0) return;
+    
+    try {
+      // Serialize entries for local storage (convert Timestamps)
+      const serializedEntries = entriesToSave.map(entry => ({
+        ...entry,
+        date: serializeTimestamp(entry.date)
+      }));
+      
+      localStorage.setItem(
+        `${LOCAL_STORAGE_ENTRIES_KEY}_${currentUser.uid}`, 
+        JSON.stringify(serializedEntries)
+      );
+      console.log("Saved entries to local storage:", entriesToSave.length);
+    } catch (error) {
+      console.error("Error saving entries to local storage:", error);
+    }
+  };
+
+  // Save summary to local storage
+  const saveSummaryToLocalStorage = (summary: JournalSummary) => {
+    if (!currentUser || !summary) return;
+    
+    try {
+      // Serialize summary for local storage (convert Timestamps)
+      const serializedSummary = {
+        ...summary,
+        createdAt: serializeTimestamp(summary.createdAt),
+        startDate: serializeTimestamp(summary.startDate),
+        endDate: serializeTimestamp(summary.endDate),
+        moodTrends: {
+          ...summary.moodTrends,
+          highestDay: summary.moodTrends.highestDay ? {
+            ...summary.moodTrends.highestDay,
+            date: serializeTimestamp(summary.moodTrends.highestDay.date)
+          } : undefined,
+          lowestDay: summary.moodTrends.lowestDay ? {
+            ...summary.moodTrends.lowestDay,
+            date: serializeTimestamp(summary.moodTrends.lowestDay.date)
+          } : undefined
+        }
+      };
+      
+      localStorage.setItem(
+        `${LOCAL_STORAGE_SUMMARY_KEY}_${currentUser.uid}`, 
+        JSON.stringify(serializedSummary)
+      );
+      console.log("Saved summary to local storage");
+    } catch (error) {
+      console.error("Error saving summary to local storage:", error);
+    }
+  };
 
   // Load the most recent weekly summary
   useEffect(() => {
@@ -136,10 +284,15 @@ export const JournalProvider: React.FC<{ children: ReactNode }> = ({ children })
         const querySnapshot = await getDocs(q);
         if (!querySnapshot.empty) {
           const summaryDoc = querySnapshot.docs[0];
-          setWeeklySummary({
+          const newSummary = {
             id: summaryDoc.id,
             ...summaryDoc.data()
-          } as JournalSummary);
+          } as JournalSummary;
+          
+          setWeeklySummary(newSummary);
+          
+          // Save to local storage
+          saveSummaryToLocalStorage(newSummary);
         } else {
           setWeeklySummary(null);
         }
@@ -243,55 +396,117 @@ export const JournalProvider: React.FC<{ children: ReactNode }> = ({ children })
     ).length;
   };
 
-  // Add a new journal entry
+  // Add a new journal entry with local storage backup
   const addEntry = async (entryData: NewJournalEntryData) => {
     if (!currentUser) {
       console.error("Cannot add entry: No user logged in.");
       return;
     }
+    
+    // Create a temporary local entry first for immediate UI update
+    const tempId = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const newEntry: JournalEntry = {
+      id: tempId,
+      content: entryData.content,
+      mood: entryData.mood,
+      date: Timestamp.now() // Use local timestamp for now
+    };
+    
+    // Update local state immediately for responsive UI
+    const updatedEntries = [newEntry, ...entries];
+    setEntries(updatedEntries);
+    calculateStreaks(updatedEntries);
+    
+    // Save to local storage immediately
+    saveEntriesToLocalStorage(updatedEntries);
+    
     try {
+      // Then try to save to Firestore
       const userJournalCollection = `${BASE_JOURNAL_COLLECTION}/${currentUser.uid}/entries`;
       const journalCollectionRef = collection(db, userJournalCollection);
-      await addDoc(journalCollectionRef, {
+      const docRef = await addDoc(journalCollectionRef, {
         ...entryData,
         date: serverTimestamp(),
       });
+      
+      // If successful, update the temp entry with the real Firestore ID
+      // This will happen automatically via the onSnapshot listener
+      console.log("Entry successfully saved to Firestore with ID:", docRef.id);
+      
     } catch (error) {
-      console.error("Error adding journal entry:", error);
+      console.error("Error adding journal entry to Firestore:", error);
+      // Entry is already saved locally, so UI remains updated
+      alert("Your journal entry was saved locally but couldn't be synced to the cloud. It will sync when your connection is restored.");
     }
   };
 
-  // Update an existing entry
+  // Update an existing entry with local storage backup
   const updateEntry = async (id: string, updates: Partial<Omit<JournalEntry, 'id' | 'date'>>) => {
     if (!currentUser) {
       console.error("Cannot update entry: No user logged in.");
       return;
     }
+    
+    // Update in local state first for immediate UI response
+    const updatedEntries = entries.map(entry => 
+      entry.id === id 
+        ? { ...entry, ...updates } 
+        : entry
+    );
+    
+    setEntries(updatedEntries);
+    calculateStreaks(updatedEntries);
+    
+    // Save to local storage immediately
+    saveEntriesToLocalStorage(updatedEntries);
+    
     try {
+      // Then update in Firestore
       const userJournalCollection = `${BASE_JOURNAL_COLLECTION}/${currentUser.uid}/entries`;
       const entryDocRef = doc(db, userJournalCollection, id);
       await updateDoc(entryDocRef, updates);
+      console.log("Entry successfully updated in Firestore");
+      
     } catch (error) {
-      console.error("Error updating journal entry:", error);
+      console.error("Error updating journal entry in Firestore:", error);
+      // Entry is already updated locally, so UI remains updated
+      alert("Your journal update was saved locally but couldn't be synced to the cloud. It will sync when your connection is restored.");
     }
   };
 
-  // Delete an entry
+  // Delete an entry with local storage backup
   const deleteEntry = async (id: string) => {
     if (!currentUser) {
       console.error("Cannot delete entry: No user logged in.");
       return;
     }
+    
+    // Remove from local state first for immediate UI response
+    const updatedEntries = entries.filter(entry => entry.id !== id);
+    setEntries(updatedEntries);
+    calculateStreaks(updatedEntries);
+    
+    // Update local storage immediately
+    saveEntriesToLocalStorage(updatedEntries);
+    
     try {
-      const userJournalCollection = `${BASE_JOURNAL_COLLECTION}/${currentUser.uid}/entries`;
-      const entryDocRef = doc(db, userJournalCollection, id);
-      await deleteDoc(entryDocRef);
+      // Then delete from Firestore
+      // Skip deletion if it's a temporary ID (not yet saved to Firestore)
+      if (!id.startsWith('temp_')) {
+        const userJournalCollection = `${BASE_JOURNAL_COLLECTION}/${currentUser.uid}/entries`;
+        const entryDocRef = doc(db, userJournalCollection, id);
+        await deleteDoc(entryDocRef);
+        console.log("Entry successfully deleted from Firestore");
+      }
+      
     } catch (error) {
-      console.error("Error deleting journal entry:", error);
+      console.error("Error deleting journal entry from Firestore:", error);
+      // Entry is already deleted locally, so UI remains updated
+      alert("The entry was removed locally but couldn't be deleted from the cloud. This will sync when your connection is restored.");
     }
   };
 
-  // Generate weekly AI summary
+  // Generate weekly AI summary with local storage backup
   const generateWeeklySummary = async () => {
     if (!currentUser) {
       console.error("Cannot generate summary: No user logged in.");
@@ -309,25 +524,10 @@ export const JournalProvider: React.FC<{ children: ReactNode }> = ({ children })
       const endTimestamp = Timestamp.fromDate(endDate);
       const startTimestamp = Timestamp.fromDate(startDate);
       
-      // Fetch entries for the past 7 days
-      const userJournalCollection = `${BASE_JOURNAL_COLLECTION}/${currentUser.uid}/entries`;
-      const journalCollectionRef = collection(db, userJournalCollection);
-      const q = query(
-        journalCollectionRef,
-        where('date', '>=', startTimestamp),
-        where('date', '<=', endTimestamp),
-        orderBy('date', 'desc')
-      );
-      
-      const querySnapshot = await getDocs(q);
-      const recentEntries: JournalEntry[] = [];
-      
-      querySnapshot.forEach((doc) => {
-        recentEntries.push({
-          id: doc.id,
-          ...doc.data(),
-          date: doc.data().date as Timestamp,
-        } as JournalEntry);
+      // Use entries from local state (which includes entries from both Firestore and local storage)
+      const recentEntries = entries.filter(entry => {
+        const entryDate = entry.date.toDate();
+        return entryDate >= startDate && entryDate <= endDate;
       });
       
       // If no entries in the past week, return early
@@ -353,12 +553,14 @@ export const JournalProvider: React.FC<{ children: ReactNode }> = ({ children })
       }));
       
       // Get our API endpoint
-      const apiEndpoint = import.meta.env.VITE_API_ENDPOINT?.replace('/chat', '/journal-summary');
+      const apiEndpoint = import.meta.env.VITE_JOURNAL_SUMMARY_ENDPOINT || 
+                           import.meta.env.VITE_API_ENDPOINT?.replace('/chat', '/journal-summary');
+      
       if (!apiEndpoint) {
         throw new Error("API endpoint is missing. Please check your .env file.");
       }
       
-      // Call our backend proxy for Gemini
+      // Call our backend proxy for AI analysis
       const response = await fetch(apiEndpoint, {
         method: 'POST',
         headers: {
@@ -382,7 +584,7 @@ export const JournalProvider: React.FC<{ children: ReactNode }> = ({ children })
         createdAt: Timestamp.now(),
         startDate: startTimestamp,
         endDate: endTimestamp,
-        summary: aiAnalysis.summary,
+        summary: aiAnalysis.summary || "Here's a summary of your journal entries for the past week.",
         moodTrends: {
           average: avgMood,
           trend: aiAnalysis.trend || 'stable',
@@ -395,26 +597,48 @@ export const JournalProvider: React.FC<{ children: ReactNode }> = ({ children })
             mood: lowestMoodEntry.mood
           }
         },
-        themes: aiAnalysis.themes || [],
-        insights: aiAnalysis.insights || [],
-        recommendations: aiAnalysis.recommendations || []
+        themes: aiAnalysis.themes || ["Journaling"],
+        insights: aiAnalysis.insights || ["Regular journaling helps track your mood patterns."],
+        recommendations: aiAnalysis.recommendations || ["Continue to journal regularly for better insights."]
       };
       
-      // Save to Firestore
-      const summariesPath = `${BASE_JOURNAL_COLLECTION}/${currentUser.uid}/${SUMMARIES_COLLECTION}`;
-      const summariesRef = collection(db, summariesPath);
-      const docRef = await addDoc(summariesRef, summaryData);
-      
-      // Update state with new summary
-      const newSummary: JournalSummary = {
-        id: docRef.id,
+      // Create temp ID for local storage in case Firestore fails
+      const tempSummary: JournalSummary = {
+        id: `temp_summary_${Date.now()}`,
         ...summaryData
       };
       
-      setWeeklySummary(newSummary);
+      // Update state immediately
+      setWeeklySummary(tempSummary);
+      
+      // Save to local storage immediately
+      saveSummaryToLocalStorage(tempSummary);
+      
+      try {
+        // Save to Firestore
+        const summariesPath = `${BASE_JOURNAL_COLLECTION}/${currentUser.uid}/${SUMMARIES_COLLECTION}`;
+        const summariesRef = collection(db, summariesPath);
+        const docRef = await addDoc(summariesRef, summaryData);
+        
+        // Update with real ID if Firestore succeeds
+        const newSummary = {
+          id: docRef.id,
+          ...summaryData
+        };
+        
+        setWeeklySummary(newSummary);
+        saveSummaryToLocalStorage(newSummary);
+        
+      } catch (firestoreError) {
+        console.error("Error saving summary to Firestore:", firestoreError);
+        // Summary is already in state and local storage, so UI remains updated
+        alert("Your journal summary was generated and saved locally but couldn't be synced to the cloud. It will sync when your connection is restored.");
+      }
+      
     } catch (error) {
       console.error("Error generating weekly summary:", error);
-      // Create simplified summary on error as fallback
+      
+      // Create local fallback summary without API
       if (entries.length > 0) {
         // Calculate basic stats without AI
         const recentEntries = entries.filter(entry => 
@@ -429,11 +653,12 @@ export const JournalProvider: React.FC<{ children: ReactNode }> = ({ children })
           const highestMoodEntry = sortedByMood[0];
           const lowestMoodEntry = sortedByMood[sortedByMood.length - 1];
           
-          const fallbackSummary: Omit<JournalSummary, 'id'> = {
+          const fallbackSummary: JournalSummary = {
+            id: `local_${Date.now()}`,
             createdAt: Timestamp.now(),
             startDate: Timestamp.fromDate(subDays(new Date(), 7)),
             endDate: Timestamp.now(),
-            summary: "Weekly summary could not be generated with AI. Here's a simple statistical summary instead.",
+            summary: "Weekly summary could not be generated with AI. Here's a simple statistical summary based on your entries.",
             moodTrends: {
               average: avgMood,
               trend: 'stable',
@@ -446,23 +671,44 @@ export const JournalProvider: React.FC<{ children: ReactNode }> = ({ children })
                 mood: lowestMoodEntry.mood
               }
             },
-            themes: ["Theme analysis unavailable"],
-            insights: ["AI insights unavailable"],
-            recommendations: ["Try journaling more regularly for better insights"]
+            themes: ["Journaling"],
+            insights: ["You've been journaling regularly."],
+            recommendations: ["Continue journaling to track your mood patterns."]
           };
           
-          // Save fallback summary
-          const summariesPath = `${BASE_JOURNAL_COLLECTION}/${currentUser.uid}/${SUMMARIES_COLLECTION}`;
-          const summariesRef = collection(db, summariesPath);
-          addDoc(summariesRef, fallbackSummary)
-            .then(docRef => {
-              setWeeklySummary({
-                id: docRef.id,
-                ...fallbackSummary
-              });
-            })
-            .catch(err => console.error("Error saving fallback summary:", err));
+          // Update state with local fallback
+          setWeeklySummary(fallbackSummary);
+          
+          // Save local fallback to local storage
+          saveSummaryToLocalStorage(fallbackSummary);
+          
+          // Try to save to Firestore if possible
+          try {
+            const summariesPath = `${BASE_JOURNAL_COLLECTION}/${currentUser.uid}/${SUMMARIES_COLLECTION}`;
+            const summariesRef = collection(db, summariesPath);
+            
+            // Use destructuring to create a new object without id
+            const { id, ...fallbackDataWithoutId } = fallbackSummary;
+            
+            addDoc(summariesRef, fallbackDataWithoutId)
+              .then(docRef => {
+                const updatedSummary = {
+                  ...fallbackSummary,
+                  id: docRef.id
+                };
+                setWeeklySummary(updatedSummary);
+                saveSummaryToLocalStorage(updatedSummary);
+              })
+              .catch(err => console.error("Error saving fallback summary to Firestore:", err));
+              
+          } catch (firestoreError) {
+            console.error("Error initializing Firestore save for fallback summary:", firestoreError);
+          }
+        } else {
+          alert("No journal entries found for the past week. Please add some entries first.");
         }
+      } else {
+        alert("No journal entries found. Please add some entries first.");
       }
     } finally {
       setWeeklySummaryLoading(false);

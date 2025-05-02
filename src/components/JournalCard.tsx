@@ -5,10 +5,12 @@ import { JournalEntry } from '../contexts/JournalContext';
 import { Timestamp } from 'firebase/firestore'; // Import Timestamp here
 
 interface JournalCardProps {
-  entry: JournalEntry; // Keep only one interface definition
+  entry: JournalEntry;
+  onClick?: () => void; // Optional onClick handler
 }
 
-const JournalCard: React.FC<JournalCardProps> = ({ entry }) => {
+// Component with onClick support
+const JournalCard: React.FC<JournalCardProps> = ({ entry, onClick }) => {
   // Convert Firestore Timestamp to JS Date before formatting
   const jsDate = entry.date instanceof Timestamp ? entry.date.toDate() : entry.date;
   const formattedDate = format(jsDate, 'MMMM d, yyyy');
@@ -22,7 +24,8 @@ const JournalCard: React.FC<JournalCardProps> = ({ entry }) => {
   return (
     <motion.div 
       whileHover={{ y: -5 }}
-      className="bg-white rounded-xl shadow-soft overflow-hidden"
+      className="bg-white rounded-xl shadow-soft overflow-hidden cursor-pointer"
+      onClick={onClick}
     >
       <div className="p-4 border-b border-gray-100 flex justify-between items-center">
         <span className="text-sm font-medium text-gray-600">{formattedDate}</span>
@@ -33,7 +36,13 @@ const JournalCard: React.FC<JournalCardProps> = ({ entry }) => {
       <div className="p-4">
         <p className="text-gray-700 whitespace-pre-line">{shortText}</p>
         {entry.content.length > 150 && (
-          <button className="mt-2 text-primary-500 text-sm font-medium hover:underline">
+          <button 
+            className="mt-2 text-primary-500 text-sm font-medium hover:underline"
+            onClick={(e) => {
+              e.stopPropagation(); // Prevent triggering the parent onClick
+              onClick && onClick();
+            }}
+          >
             Read more
           </button>
         )}
